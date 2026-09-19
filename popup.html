@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HD Image Grabber</title>
+    <title>HD Image Grabber v3</title>
     <style>
         :root {
             --bg: #0f172a;
@@ -14,6 +14,7 @@
             --muted: #94a3b8;
             --border: #334155;
             --accent: #22c55e;
+            --danger: #ef4444;
         }
 
         * {
@@ -26,8 +27,8 @@
         body {
             background-color: var(--bg);
             color: var(--text);
-            width: 420px;
-            max-height: 600px;
+            width: 440px;
+            max-height: 620px;
             display: flex;
             flex-direction: column;
             overflow: hidden;
@@ -60,7 +61,7 @@
             padding: 0.5rem 1rem;
             border-bottom: 1px solid var(--border);
             display: flex;
-            gap: 0.5rem;
+            gap: 0.4rem;
             align-items: center;
             flex-wrap: wrap;
         }
@@ -69,9 +70,9 @@
             background-color: var(--primary);
             color: white;
             border: none;
-            padding: 0.35rem 0.75rem;
+            padding: 0.35rem 0.6rem;
             border-radius: 0.25rem;
-            font-size: 0.75rem;
+            font-size: 0.7rem;
             font-weight: 500;
             cursor: pointer;
             transition: background 0.2s;
@@ -87,6 +88,14 @@
 
         .btn-success:hover {
             background-color: #16a34a;
+        }
+
+        .btn-danger {
+            background-color: var(--danger);
+        }
+
+        .btn-danger:hover {
+            background-color: #dc2626;
         }
 
         .btn-outline {
@@ -116,29 +125,93 @@
             align-items: center;
         }
 
-        .setting-row input[type="number"], .setting-row input[type="text"] {
+        .setting-row input, .setting-row select {
             background: var(--surface);
             color: var(--text);
             border: 1px solid var(--border);
             padding: 0.2rem 0.4rem;
             border-radius: 0.25rem;
-            width: 80px;
             font-size: 0.75rem;
         }
 
-        .setting-row input[type="text"] {
-            width: 140px;
-        }
+        .setting-row input[type="number"] { width: 60px; }
+        .setting-row input[type="text"] { width: 110px; }
 
+        /* Container for images */
         .grid-container {
             flex: 1;
             overflow-y: auto;
             padding: 0.75rem;
+            max-height: 300px;
+        }
+
+        /* View Modes */
+        /* 1. Grid Big */
+        .mode-grid-big {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
             gap: 0.5rem;
-            max-height: 320px;
         }
+        .mode-grid-big .img-card {
+            aspect-ratio: 1;
+            height: 100px;
+        }
+
+        /* 2. Grid Small */
+        .mode-grid-small {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0.4rem;
+        }
+        .mode-grid-small .img-card {
+            aspect-ratio: 1;
+            height: 75px;
+        }
+        .mode-grid-small .img-badge { font-size: 7px; }
+
+        /* 3. List View */
+        .mode-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+        }
+        .mode-list .img-card {
+            display: flex;
+            align-items: center;
+            height: 48px;
+            padding: 0 0.5rem;
+            gap: 0.5rem;
+        }
+        .mode-list .img-card img {
+            width: 36px;
+            height: 36px;
+            object-fit: cover;
+            border-radius: 0.2rem;
+        }
+        .mode-list .img-card .img-info {
+            flex: 1;
+            font-size: 0.75rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        /* 4. Text Only (Name & Size) */
+        .mode-text-only {
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+        }
+        .mode-text-only .img-card {
+            display: flex;
+            align-items: center;
+            height: 36px;
+            padding: 0 0.5rem;
+            gap: 0.5rem;
+            font-size: 0.75rem;
+        }
+        .mode-text-only .img-card img { display: none; }
+        .mode-text-only .img-card .img-info { flex: 1; }
 
         .img-card {
             background-color: var(--surface);
@@ -147,10 +220,6 @@
             overflow: hidden;
             position: relative;
             cursor: pointer;
-            aspect-ratio: 1;
-            display: flex;
-            align-items: center;
-            justify-content: center;
         }
 
         .img-card.selected {
@@ -170,13 +239,14 @@
             left: 4px;
             accent-color: var(--primary);
             cursor: pointer;
+            z-index: 2;
         }
 
         .img-badge {
             position: absolute;
             bottom: 2px;
             right: 2px;
-            background: rgba(0,0,0,0.7);
+            background: rgba(0,0,0,0.75);
             color: white;
             font-size: 9px;
             padding: 1px 3px;
@@ -197,44 +267,63 @@
             padding: 3rem;
             color: var(--muted);
             font-size: 0.875rem;
-            grid-column: 1 / -1;
         }
     </style>
 </head>
 <body>
     <header>
-        <div class="title">📥 HD Image Grabber</div>
-        <div class="stats" id="stats-text">0 images found</div>
+        <div class="title">📥 HD Image Grabber v3</div>
+        <div class="stats" id="stats-text">0 found</div>
     </header>
 
     <div class="toolbar">
-        <button class="btn btn-success" id="btn-download">Download Selected (0)</button>
+        <button class="btn btn-success" id="btn-download">Download (0)</button>
+        <button class="btn btn-danger hidden" id="btn-stop">Stop</button>
+        <button class="btn btn-outline" id="btn-copy">📋 Copy URLs</button>
         <button class="btn btn-outline" id="btn-select-all">All</button>
         <button class="btn btn-outline" id="btn-deselect-all">None</button>
-        <button class="btn btn-outline" id="btn-rescan">🔄 Rescan</button>
+        <button class="btn btn-outline" id="btn-rescan">🔄</button>
     </div>
 
     <div class="settings-panel">
         <div class="setting-row">
-            <span>Min Width / Height (px):</span>
+            <span>Min Width / Height:</span>
             <div style="display: flex; gap: 4px;">
-                <input type="number" id="min-width" value="300" min="0" placeholder="Width">
-                <input type="number" id="min-height" value="300" min="0" placeholder="Height">
+                <input type="number" id="min-width" value="200" min="0">
+                <input type="number" id="min-height" value="200" min="0">
             </div>
         </div>
         <div class="setting-row">
-            <span>Download Folder Name:</span>
-            <input type="text" id="folder-name" value="HD_Image_Grabber" placeholder="Folder name">
+            <span>Format & View:</span>
+            <div style="display: flex; gap: 4px;">
+                <select id="format-filter">
+                    <option value="all">All Formats</option>
+                    <option value="jpg">JPG</option>
+                    <option value="png">PNG</option>
+                    <option value="webp">WebP</option>
+                    <option value="gif">GIF</option>
+                </select>
+                <select id="view-mode">
+                    <option value="grid-big">Grid (Big)</option>
+                    <option value="grid-small">Grid (Small)</option>
+                    <option value="list">List</option>
+                    <option value="text-only">Text Only</option>
+                </select>
+            </div>
+        </div>
+        <div class="setting-row">
+            <span>Folder Name:</span>
+            <input type="text" id="folder-name" value="HD_Image_Grabber">
         </div>
     </div>
 
-    <div class="grid-container" id="image-grid">
+    <div class="grid-container mode-grid-big" id="image-grid">
         <div class="loading">Scanning page for images & HD links...</div>
     </div>
 
     <footer>
-        <div class="stats" id="selected-text">0 selected</div>
-        <div class="stats" style="color: var(--primary);">Fatkun Style Grabber</div>
+        <div class="stats" id="selected-text">Selected: 0</div>
+        <div class="stats" style="color: var(--primary);">v3 Enhanced</div>
     </footer>
 
     <script src="popup.js"></script>
