@@ -1,18 +1,22 @@
-// Background service worker for HD Image Grabber
+// Background service worker for HD Image Grabber (v2)
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'downloadImages') {
         const urls = request.urls;
-        const folder = request.folder || 'HD_Image_Grabber';
+        const baseFolder = request.folder || 'HD_Image_Grabber';
+
+        // Create a unique session subfolder name based on current timestamp
+        const now = new Date();
+        const timestamp = now.toISOString().replace(/[:T]/g, '-').slice(0, 19);
+        const cleanBase = baseFolder.replace(/[^a-zA-Z0-9_\-\s]/g, '').trim() || 'HD_Image_Grabber';
+        const sessionFolder = `${cleanBase}/Session_${timestamp}`;
 
         urls.forEach((url, index) => {
-            let filename = url.split('/').pop().split('?')[0] || `image_${Date.now()}_${index}.jpg`;
+            let filename = url.split('/').pop().split('?')[0] || `image_${index + 1}.jpg`;
             if (!filename.match(/\.(jpg|jpeg|png|webp|gif|svg)$/i)) {
                 filename += '.jpg';
             }
-            // Sanitize folder name and filename
-            const cleanFolder = folder.replace(/[^a-zA-Z0-9_\-\s]/g, '').trim() || 'HD_Image_Grabber';
-            const finalPath = `${cleanFolder}/${index + 1}_${filename}`;
+            const finalPath = `${sessionFolder}/${index + 1}_${filename}`;
 
             chrome.downloads.download({
                 url: url,
@@ -25,6 +29,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             });
         });
 
-        sendResponse({ status: 'started', total: urls.length });
+        sendResponse({ status: 'started', total: urls.length, folder: sessionFolder });
     }
 });

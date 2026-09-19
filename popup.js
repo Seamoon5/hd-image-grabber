@@ -1,21 +1,43 @@
-// Popup logic for HD Image Grabber (Fatkun clone)
+// Popup logic for HD Image Grabber (v2)
 
 let allImages = [];
 let filteredImages = [];
 
 document.addEventListener('DOMContentLoaded', () => {
-    // Bind all buttons cleanly
+    // Load saved settings from chrome.storage.local
+    chrome.storage.local.get(['minWidth', 'minHeight', 'folderName'], (result) => {
+        if (result.minWidth !== undefined) document.getElementById('min-width').value = result.minWidth;
+        if (result.minHeight !== undefined) document.getElementById('min-height').value = result.minHeight;
+        if (result.folderName !== undefined) document.getElementById('folder-name').value = result.folderName;
+
+        scanImages();
+    });
+
+    // Bind buttons
     document.getElementById('btn-download').addEventListener('click', downloadSelected);
     document.getElementById('btn-select-all').addEventListener('click', () => selectAll(true));
     document.getElementById('btn-deselect-all').addEventListener('click', () => selectAll(false));
     document.getElementById('btn-rescan').addEventListener('click', scanImages);
 
-    // Bind filter inputs
-    document.getElementById('min-width').addEventListener('input', filterImages);
-    document.getElementById('min-height').addEventListener('input', filterImages);
-
-    scanImages();
+    // Bind settings change to save automatically and re-filter
+    document.getElementById('min-width').addEventListener('input', () => {
+        saveSettings();
+        filterImages();
+    });
+    document.getElementById('min-height').addEventListener('input', () => {
+        saveSettings();
+        filterImages();
+    });
+    document.getElementById('folder-name').addEventListener('input', saveSettings);
 });
+
+function saveSettings() {
+    const minWidth = parseInt(document.getElementById('min-width').value) || 0;
+    const minHeight = parseInt(document.getElementById('min-height').value) || 0;
+    const folderName = document.getElementById('folder-name').value.trim() || 'HD_Image_Grabber';
+
+    chrome.storage.local.set({ minWidth, minHeight, folderName });
+}
 
 function scanImages() {
     const grid = document.getElementById('image-grid');
@@ -92,7 +114,7 @@ function filterImages() {
     const minHeight = parseInt(document.getElementById('min-height').value) || 0;
 
     filteredImages = allImages.filter(img => {
-        // If image dimensions are unknown (0x0), keep it by default or filter if user specifies strict dims
+        // If dimensions unknown (0x0), keep by default
         if (img.width === 0 && img.height === 0) return true;
         return img.width >= minWidth && img.height >= minHeight;
     });
@@ -102,14 +124,16 @@ function filterImages() {
 
 function renderGrid() {
     const grid = document.getElementById('image-grid');
-    document.getElementById('stats-text').innerText = `${filteredImages.length} of ${allImages.length} images`;
-    
+    const totalFound = allImages.length;
+    const filteredCount = filteredImages.length;
     const selectedCount = filteredImages.filter(i => i.selected).length;
-    document.getElementById('selected-text').innerText = `${selectedCount} selected`;
+
+    document.getElementById('stats-text').innerText = `Total: ${totalFound} | Matched: ${filteredCount}`;
+    document.getElementById('selected-text').innerText = `Selected to download: ${selectedCount}`;
     document.getElementById('btn-download').innerText = `Download Selected (${selectedCount})`;
 
     if (filteredImages.length === 0) {
-        grid.innerHTML = '<div class="loading">No images found matching resolution filter.</div>';
+        grid.innerHTML = '<div class="loading">No images found matching minimum resolution.</div>';
         return;
     }
 
@@ -121,10 +145,9 @@ function renderGrid() {
         </div>
     `).join('');
 
-    // Add event listeners to cards for clicking and checkbox toggling
     document.querySelectorAll('.img-card').forEach(card => {
         const index = parseInt(card.getAttribute('data-index'));
-        card.addEventListener('click', (e) => {
+        card.addEventListener('click', () => {
             filteredImages[index].selected = !filteredImages[index].selected;
             renderGrid();
         });
@@ -153,7 +176,7 @@ function downloadSelected() {
         if (chrome.runtime.lastError) {
             alert('Error starting download: ' + chrome.runtime.lastError.message);
         } else {
-            alert(`Started downloading ${selectedUrls.length} images to folder "${folderName}"!`);
+            alert(`Started downloading ${selectedUrls.length} images into a new session folder inside "${folderName}"!`);
         }
     });
 }
