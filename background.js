@@ -2,6 +2,7 @@
 
 let currentDownloadIds = [];
 let crcTable = null;
+let lastScan = null;
 const MAX_ANALYZE = 250;
 const ANALYZE_CONCURRENCY = 6;
 
@@ -350,10 +351,128 @@ function safeName(name) {
     return name.replace(/[\/\\:*?"<>|]/g, '_').replace(/\s+/g, '_').slice(0, 120);
 }
 
+// Runs in the page context: lazy-scroll then collect all image URLs (injected via executeScript)
+function extractPageImages() {
+    return new Promise((resolveMain) => {
+        const done = (arr) => resolveMain(arr || []);
+
+        setTimeout(async () => {
+            try {
+                const body = document.body;
+                const maxSteps = 30;
+                const step = 500;
+                let lastHeight = -1;
+                if (body) {
+                    for (let i = 0; i < maxSteps; i++) {
+                        if (window.innerHeight + window.scrollY >= body.scrollHeight - 10) break;
+                        window.scrollBy(0, step);
+                        await new Promise(r => setTimeout(r, 250));
+                        if (body.scrollHeight === lastHeight) break;
+                        lastHeight = body.scrollHeight;
+                    }
+                    window.scrollTo(0, 0);
+                }
+            } catch (e) {}
+
+            try {
+                const map = new Map();
+                function add(url) {
+                    if (!url || typeof url !== 'string') return;
+                    if (url.startsWith('data:') || url.startsWith('blob:')) return;
+                    try {
+                        const abs = new URL(url, window.location.href);
+                        if (abs.protocol === 'http:' || abs.protocol === 'https:') {
+                            if (!map.has(abs.href)) map.set(abs.href, abs.href);
+                        }
+                    } catch (e) {}
+                }
+
+                document.querySelectorAll('img').forEach(img => {
+                    const src = img.currentSrc || img.src || img.dataset.src ||
+                        img.getAttribute('data-original') || img.getAttribute('data-full') ||
+                        img.getAttribute('data-hd') || img.getAttribute('data-zoom');
+                    if (src) add(src);
+                    if (img.srcset) {
+                        img.srcset.split(',').forEach(part => {
+                            const u = part.trim().split(/\s+/)[0];
+                            if (u) add(u);
+                        });
+                    }
+                });
+
+                document.querySelectorAll('picture source').forEach(s => {
+                    if (s.srcset) {
+                        s.srcset.split(',').forEach(part => {
+                            const u = part.trim().split(/\s+/)[0];
+                            if (u) add(u);
+                        });
+                    }
+                    if (s.src) add(s.src);
+                });
+
+                document.querySelectorAll('a').forEach(a => {
+                    if (a.href && /\.(jpe?g|png|webp|gif|avif|svg|bmp)(\?.*)?$/i.test(a.href)) add(a.href);
+                });
+
+                document.querySelectorAll('meta').forEach(m => {
+                    const prop = (m.getAttribute('property') || m.getAttribute('name') || '').toLowerCase();
+                    if (prop === 'og:image' || prop === 'og:image:url' || prop === 'twitter:image') add(m.content);
+                });
+
+                document.querySelectorAll('div,span,section,li,a,figure,img').forEach(el => {
+                    const bg = window.getComputedStyle(el).backgroundImage;
+                    if (bg && bg !== 'none') {
+                        (bg.match(/url\((['"]?)(.*?)\1\)/g) || []).forEach(m => {
+                            const u = m.replace(/url\((['"]?)/, '').replace(/['"]?\)$/, '');
+                            if (u) add(u);
+                        });
+                    }
+                });
+
+                done(Array.from(map.keys()));
+            } catch (e) {
+                done([]);
+            }
+        }, 50);
+    });
+}
+
 // ---------------------------------------------------------------
 // Message routing
 // ---------------------------------------------------------------
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === 'runScan') {
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            const tab = tabs && tabs[0];
+            if (!tab || !/^https?:/.test(tab.url || '')) {
+                sendResponse({ ok: false, error: 'Open a normal http(s) page first.' });
+                return;
+            }
+            chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                func: extractPageImages
+            }, async (results) => {
+                if (chrome.runtime.lastError || !results || !results[0] || !results[0].result) {
+                    sendResponse({ ok: false, error: 'Could not scan this page.' });
+                    return;
+                }
+                try {
+                    const analyzed = await analyzeImageList(results[0].result || []);
+                    lastScan = analyzed;
+                    sendResponse({ ok: true, images: analyzed, fromCache: false });
+                } catch (e) {
+                    sendResponse({ ok: false, error: 'Analysis failed: ' + e.message });
+                }
+            });
+        });
+        return true; // async
+    }
+
+    if (request.action === 'getScan') {
+        sendResponse(lastScan ? { ok: true, images: lastScan, fromCache: true } : { ok: false, error: 'No scan yet.' });
+        return;
+    }
+
     if (request.action === 'analyzeImages') {
         (async () => {
             try {
@@ -369,10 +488,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'downloadImages') {
         const urls = request.urls;
         const baseFolder = request.folder || 'HD_Image_Grabber';
+        const useFolder = request.useFolder !== false;
         const now = new Date();
         const timestamp = now.toISOString().replace(/[:T]/g, '-').slice(0, 19);
         const cleanBase = baseFolder.replace(/[^a-zA-Z0-9_\-\s]/g, '').trim() || 'HD_Image_Grabber';
-        const sessionFolder = `${cleanBase}/Session_${timestamp}`;
 
         currentDownloadIds = [];
         let completed = 0;
@@ -382,7 +501,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             if (!filename.match(/\.(jpg|jpeg|png|webp|gif|svg|avif)$/i)) {
                 filename += '.jpg';
             }
-            const finalPath = `${sessionFolder}/${index + 1}_${filename}`;
+            const finalPath = useFolder
+                ? `${cleanBase}/${timestamp}_${filename}`
+                : filename;
 
             chrome.downloads.download({
                 url: url,
@@ -419,10 +540,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 chrome.runtime.onConnect.addListener((port) => {
     if (port.name !== 'zipProgress') return;
 
+    // Safely notify the popup; ignore errors if the popup was already closed.
+    const notify = (msg) => {
+        try { port.postMessage(msg); } catch (e) {}
+    };
+    const setBadge = (text) => {
+        try { chrome.action.setBadgeText({ text }); } catch (e) {}
+    };
+
     port.onMessage.addListener(async (request) => {
         if (request.action !== 'startZipDownload') return;
 
         const urls = request.urls || [];
+        const useFolder = request.useFolder !== false;
         const cleanBase = (request.folder || 'HD_Image_Grabber').replace(/[^a-zA-Z0-9_\-\s]/g, '').trim() || 'HD_Image_Grabber';
         const now = new Date();
         const timestamp = now.toISOString().replace(/[:T]/g, '-').slice(0, 19);
@@ -451,18 +581,22 @@ chrome.runtime.onConnect.addListener((port) => {
             } catch (e) {
                 failed++;
             }
-            port.postMessage({ type: 'progress', done, failed, total, name: name });
+            notify({ type: 'progress', done, failed, total, name: name });
+            setBadge(String(done + failed));
         }
 
         if (entries.length === 0) {
-            port.postMessage({ type: 'error', message: 'None of the images could be fetched.' });
+            notify({ type: 'error', message: 'None of the images could be fetched.' });
+            setBadge('!');
             return;
         }
 
         try {
             const zipBytes = buildZip(entries);
             const blob = new Blob([zipBytes], { type: 'application/zip' });
-            const filename = `${cleanBase}/Session_${timestamp}_images.zip`;
+            const filename = useFolder
+                ? `${cleanBase}/${timestamp}_images.zip`
+                : `HD_Image_Grabber_${timestamp}.zip`;
 
             let dlUrl;
             let revoke = null;
@@ -490,9 +624,13 @@ chrome.runtime.onConnect.addListener((port) => {
                 });
             });
 
-            port.postMessage({ type: 'done', filename, total, saved: done, failed });
+            notify({ type: 'done', filename, total, saved: done, failed });
+            setBadge('OK');
+            setTimeout(() => setBadge(''), 15000);
         } catch (e) {
-            port.postMessage({ type: 'error', message: 'ZIP build failed: ' + e.message });
+            notify({ type: 'error', message: 'ZIP build failed: ' + e.message });
+            setBadge('!');
+            setTimeout(() => setBadge(''), 15000);
         }
     });
 });

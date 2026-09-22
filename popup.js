@@ -6,7 +6,7 @@ let activeDownloads = [];
 let zipPort = null;
 
 document.addEventListener('DOMContentLoaded', () => {
-    chrome.storage.local.get(['minWidth', 'minHeight', 'minKb', 'urlFilter', 'folderName', 'formatFilter', 'viewMode'], (result) => {
+    chrome.storage.local.get(['minWidth', 'minHeight', 'minKb', 'urlFilter', 'folderName', 'formatFilter', 'viewMode', 'saveFolder'], (result) => {
         if (result.minWidth !== undefined) document.getElementById('min-width').value = result.minWidth;
         if (result.minHeight !== undefined) document.getElementById('min-height').value = result.minHeight;
         if (result.minKb !== undefined) document.getElementById('min-kb').value = result.minKb;
@@ -14,6 +14,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (result.folderName !== undefined) document.getElementById('folder-name').value = result.folderName;
         if (result.formatFilter !== undefined) document.getElementById('format-filter').value = result.formatFilter;
         if (result.viewMode !== undefined) document.getElementById('view-mode').value = result.viewMode;
+        if (result.saveFolder !== undefined) document.getElementById('save-folder').checked = result.saveFolder;
 
         updateViewModeClass();
         scanImages();
@@ -25,11 +26,12 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('btn-copy').addEventListener('click', copyUrlsToClipboard);
     document.getElementById('btn-select-all').addEventListener('click', () => selectAll(true));
     document.getElementById('btn-deselect-all').addEventListener('click', () => selectAll(false));
-    document.getElementById('btn-rescan').addEventListener('click', scanImages);
+    document.getElementById('btn-rescan').addEventListener('click', () => scanImages(true));
 
-    ['min-width', 'min-height', 'min-kb', 'url-filter', 'folder-name'].forEach(id => {
+    ['min-width', 'min-height', 'min-kb', 'url-filter'].forEach(id => {
         document.getElementById(id).addEventListener('input', () => { saveSettings(); filterImages(); });
     });
+    document.getElementById('save-folder').addEventListener('change', () => { saveSettings(); });
     document.getElementById('format-filter').addEventListener('change', () => { saveSettings(); filterImages(); });
     document.getElementById('view-mode').addEventListener('change', () => {
         saveSettings();
@@ -46,7 +48,8 @@ function saveSettings() {
         urlFilter: document.getElementById('url-filter').value.trim(),
         folderName: document.getElementById('folder-name').value.trim() || 'HD_Image_Grabber',
         formatFilter: document.getElementById('format-filter').value,
-        viewMode: document.getElementById('view-mode').value
+        viewMode: document.getElementById('view-mode').value,
+        saveFolder: document.getElementById('save-folder').checked
     });
 }
 
@@ -55,156 +58,54 @@ function updateViewModeClass() {
     grid.className = `grid-container mode-${document.getElementById('view-mode').value}`;
 }
 
-// ---------- Scanning (injected into page) ----------
+// ---------- Scanning (driven by the background worker so it survives popup close) ----------
 
-function scanImages() {
+function scanImages(forceRefresh) {
     const grid = document.getElementById('image-grid');
     grid.innerHTML = '<div class="loading">Scrolling page & grabbing images...</div>';
 
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (!tabs[0]) return;
-
-        chrome.scripting.executeScript({
-            target: { tabId: tabs[0].id },
-            func: extractPageImages
-        }, (results) => {
-            if (chrome.runtime.lastError || !results || !results[0] || !results[0].result) {
-                grid.innerHTML = '<div class="loading">Could not scan this page. Try a normal http(s) page.</div>';
-                return;
+    // If we already have a scan cached in the background, show it instantly first.
+    const showCached = () => {
+        chrome.runtime.sendMessage({ action: 'getScan' }, (response) => {
+            if (response && response.ok && !forceRefresh) {
+                const found = response.images || [];
+                loadResults(found);
             }
-
-            const found = results[0].result || [];
-            if (found.length === 0) {
-                grid.innerHTML = '<div class="loading">No images found on this page.</div>';
-                return;
-            }
-
-            grid.innerHTML = `<div class="loading">Found ${found.length} images — analyzing HD sources...</div>`;
-            analyzeImages(found);
         });
+    };
+
+    showCached();
+
+    chrome.runtime.sendMessage({ action: 'runScan' }, (response) => {
+        if (chrome.runtime.lastError || !response || !response.ok) {
+            const err = response && response.error ? response.error : chrome.runtime.lastError;
+            grid.innerHTML = `<div class="loading">Could not scan: ${err}</div>`;
+            return;
+        }
+        loadResults(response.images || []);
     });
 }
 
-function analyzeImages(urls) {
+function loadResults(images) {
+    const grid = document.getElementById('image-grid');
+    if (images.length === 0) {
+        grid.innerHTML = '<div class="loading">No images found on this page.</div>';
+        return;
+    }
+
     // Show the found images IMMEDIATELY using their own URLs (they work on the page),
     // so the user sees results right away instead of a silent wait.
-    allImages = urls.map(url => ({
-        url,
-        hdUrl: url,
-        width: 0,
-        height: 0,
-        fileSize: 0,
-        format: 'unknown',
+    allImages = images.map(img => ({
+        url: img.url,
+        hdUrl: img.hdUrl || img.url,
+        width: img.width || 0,
+        height: img.height || 0,
+        fileSize: img.fileSize || 0,
+        format: img.format || 'unknown',
         selected: true
     }));
     filterImages();
-    document.getElementById('selected-text').innerText = 'Scan complete';
-
-    chrome.runtime.sendMessage({ action: 'analyzeImages', urls }, (response) => {
-        if (chrome.runtime.lastError || !response || !response.ok) {
-            const grid = document.getElementById('image-grid');
-            const err = response && response.error ? response.error : chrome.runtime.lastError;
-            grid.innerHTML = `<div class="loading">Analysis failed: ${err} — still showing original images.</div>`;
-            return;
-        }
-
-        const hd = response.images || [];
-        const byUrl = new Map(hd.map(i => [i.url, i]));
-        let updated = 0;
-        allImages = allImages.map(img => {
-            const h = byUrl.get(img.url);
-            if (h) { img = Object.assign({}, img, h); updated++; }
-            return img;
-        });
-        document.getElementById('selected-text').innerText = updated > 0 ? `HD analysis done (${updated} upgraded)` : '';
-        filterImages();
-    });
-}
-
-// Runs in the page context: lazy-scroll then collect all image URLs
-function extractPageImages() {
-    return new Promise((resolveMain) => {
-        const done = (arr) => resolveMain(arr || []);
-
-        setTimeout(async () => {
-            try {
-                const body = document.body;
-                const maxSteps = 30;
-                const step = 500;
-                let lastHeight = -1;
-                if (body) {
-                    for (let i = 0; i < maxSteps; i++) {
-                        if (window.innerHeight + window.scrollY >= body.scrollHeight - 10) break;
-                        window.scrollBy(0, step);
-                        await new Promise(r => setTimeout(r, 250));
-                        if (body.scrollHeight === lastHeight) break;
-                        lastHeight = body.scrollHeight;
-                    }
-                    window.scrollTo(0, 0);
-                }
-            } catch (e) {}
-
-            try {
-                const map = new Map();
-                function add(url) {
-                    if (!url || typeof url !== 'string') return;
-                    if (url.startsWith('data:') || url.startsWith('blob:')) return;
-                    try {
-                        const abs = new URL(url, window.location.href);
-                        if (abs.protocol === 'http:' || abs.protocol === 'https:') {
-                            if (!map.has(abs.href)) map.set(abs.href, abs.href);
-                        }
-                    } catch (e) {}
-                }
-
-                document.querySelectorAll('img').forEach(img => {
-                    const src = img.currentSrc || img.src || img.dataset.src ||
-                        img.getAttribute('data-original') || img.getAttribute('data-full') ||
-                        img.getAttribute('data-hd') || img.getAttribute('data-zoom');
-                    if (src) add(src);
-                    if (img.srcset) {
-                        img.srcset.split(',').forEach(part => {
-                            const u = part.trim().split(/\s+/)[0];
-                            if (u) add(u);
-                        });
-                    }
-                });
-
-                document.querySelectorAll('picture source').forEach(s => {
-                    if (s.srcset) {
-                        s.srcset.split(',').forEach(part => {
-                            const u = part.trim().split(/\s+/)[0];
-                            if (u) add(u);
-                        });
-                    }
-                    if (s.src) add(s.src);
-                });
-
-                document.querySelectorAll('a').forEach(a => {
-                    if (a.href && /\.(jpe?g|png|webp|gif|avif|svg|bmp)(\?.*)?$/i.test(a.href)) add(a.href);
-                });
-
-                document.querySelectorAll('meta').forEach(m => {
-                    const prop = (m.getAttribute('property') || m.getAttribute('name') || '').toLowerCase();
-                    if (prop === 'og:image' || prop === 'og:image:url' || prop === 'twitter:image') add(m.content);
-                });
-
-                document.querySelectorAll('div,span,section,li,a,figure,img').forEach(el => {
-                    const bg = window.getComputedStyle(el).backgroundImage;
-                    if (bg && bg !== 'none') {
-                        (bg.match(/url\((['"]?)(.*?)\1\)/g) || []).forEach(m => {
-                            const u = m.replace(/url\((['"]?)/, '').replace(/['"]?\)$/, '');
-                            if (u) add(u);
-                        });
-                    }
-                });
-
-                done(Array.from(map.keys()));
-            } catch (e) {
-                done([]);
-            }
-        }, 50);
-    });
+    document.getElementById('selected-text').innerText = `Found ${allImages.length} images`;
 }
 
 // ---------- Filtering ----------
@@ -235,12 +136,7 @@ function filterImages() {
 function fallbackIcon(imgEl) {
     if (imgEl.dataset.fb) return;
     imgEl.dataset.fb = '1';
-    if (imgEl.dataset.thumb && !imgEl.dataset.triedThumb) {
-        imgEl.dataset.triedThumb = '1';
-        imgEl.src = imgEl.dataset.thumb;
-    } else {
-        imgEl.src = 'icon.png';
-    }
+    imgEl.src = 'icon.png';
 }
 
 function renderGrid() {
@@ -251,7 +147,7 @@ function renderGrid() {
 
     document.getElementById('stats-text').innerText = `Found: ${totalFound} | Filtered: ${filteredCount}`;
     document.getElementById('selected-text').innerText = `Selected: ${selectedCount}`;
-    document.getElementById('btn-download').innerText = `📦 ZIP (${selectedCount})`;
+    document.getElementById('btn-download-files').innerText = `⬇ Download (${selectedCount})`;
 
     if (filteredImages.length === 0) {
         grid.innerHTML = '<div class="loading">No images found matching criteria.</div>';
@@ -279,7 +175,7 @@ function renderGrid() {
             return `
                 <div class="img-card ${img.selected ? 'selected' : ''}" data-index="${index}">
                     <input type="checkbox" ${img.selected ? 'checked' : ''} data-index="${index}" class="img-checkbox">
-                    <img src="${img.hdUrl}" alt="img" loading="lazy" data-thumb="${img.url}">
+                    <img src="${img.url}" alt="img" loading="lazy">
                     <div class="img-info">${info}</div>
                 </div>
             `;
@@ -290,7 +186,7 @@ function renderGrid() {
             return `
                 <div class="img-card ${img.selected ? 'selected' : ''}" data-index="${index}">
                     <input type="checkbox" ${img.selected ? 'checked' : ''} data-index="${index}" class="img-checkbox">
-                    <img src="${img.hdUrl}" alt="img" loading="lazy" data-thumb="${img.url}">
+                    <img src="${img.url}" alt="img" loading="lazy">
                     ${badge}
                 </div>
             `;
@@ -363,7 +259,12 @@ function downloadZip() {
         }
     });
 
-    zipPort.postMessage({ action: 'startZipDownload', urls, folder: getFolderName() });
+    zipPort.postMessage({
+        action: 'startZipDownload',
+        urls,
+        folder: getFolderName(),
+        useFolder: document.getElementById('save-folder').checked
+    });
 }
 
 function downloadSelected() {
@@ -379,14 +280,16 @@ function downloadSelected() {
     chrome.runtime.sendMessage({
         action: 'downloadImages',
         urls,
-        folder: getFolderName()
+        folder: getFolderName(),
+        useFolder: document.getElementById('save-folder').checked
     }, (response) => {
         if (chrome.runtime.lastError) {
             alert('Error starting download: ' + chrome.runtime.lastError.message);
             resetDownloadButtons();
         } else {
             activeDownloads = (response && response.downloadIds) || [];
-            alert(`Started downloading ${urls.length} images!`);
+            const where = document.getElementById('save-folder').checked ? `into "${getFolderName()}" folder` : 'directly into Downloads';
+            alert(`Started downloading ${urls.length} images ${where}!`);
             resetDownloadButtons();
         }
     });
