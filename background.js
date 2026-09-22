@@ -182,6 +182,19 @@ async function analyzeOne(url) {
     const orig = await probeImage(url);
     if (!orig) return fallback;
 
+    // If the URL already has no resize params/tokens to strip, it IS the original.
+    const stripped = stripResizeQuery(url);
+    if (stripped === url || hdCandidates(url).length <= 1) {
+        return {
+            url,
+            hdUrl: url,
+            width: orig.size ? orig.size.width : 0,
+            height: orig.size ? orig.size.height : 0,
+            fileSize: orig.totalSize || 0,
+            format: orig.type ? formatFrom(url, orig.type) : formatFrom(url, '')
+        };
+    }
+
     let best = { size: orig.size, totalSize: orig.totalSize, type: orig.type, hdUrl: url };
     for (const cand of hdCandidates(url).slice(1)) {
         const r = await probeImage(cand);
@@ -215,12 +228,19 @@ async function mapPool(items, limit, fn) {
     return results;
 }
 
-async function analyzeImageList(urls) {
+async function analyzeImageList(urls, onProgress) {
     const unique = [];
     const seen = new Set();
     urls.forEach((u) => { if (u && u.startsWith('http') && !seen.has(u)) { seen.add(u); unique.push(u); } });
     const limited = unique.slice(0, MAX_ANALYZE);
-    const analyzed = await mapPool(limited, ANALYZE_CONCURRENCY, analyzeOne);
+    let processed = 0;
+    const onOne = async (u, i) => {
+        const res = await analyzeOne(u);
+        processed++;
+        if (onProgress) onProgress(processed, limited.length);
+        return res;
+    };
+    const analyzed = await mapPool(limited, ANALYZE_CONCURRENCY, onOne);
     return analyzed.filter(Boolean);
 }
 

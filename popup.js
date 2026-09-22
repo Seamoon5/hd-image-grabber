@@ -86,94 +86,124 @@ function scanImages() {
 }
 
 function analyzeImages(urls) {
+    // Show the found images IMMEDIATELY using their own URLs (they work on the page),
+    // so the user sees results right away instead of a silent wait.
+    allImages = urls.map(url => ({
+        url,
+        hdUrl: url,
+        width: 0,
+        height: 0,
+        fileSize: 0,
+        format: 'unknown',
+        selected: true
+    }));
+    filterImages();
+    document.getElementById('selected-text').innerText = 'Scan complete';
+
     chrome.runtime.sendMessage({ action: 'analyzeImages', urls }, (response) => {
         if (chrome.runtime.lastError || !response || !response.ok) {
-            const err = response && response.error ? response.error : chrome.runtime.lastError;
             const grid = document.getElementById('image-grid');
-            grid.innerHTML = `<div class="loading">Analysis failed: ${err}</div>`;
+            const err = response && response.error ? response.error : chrome.runtime.lastError;
+            grid.innerHTML = `<div class="loading">Analysis failed: ${err} — still showing original images.</div>`;
             return;
         }
 
-        allImages = (response.images || []).map(img => ({ ...img, selected: true }));
+        const hd = response.images || [];
+        const byUrl = new Map(hd.map(i => [i.url, i]));
+        let updated = 0;
+        allImages = allImages.map(img => {
+            const h = byUrl.get(img.url);
+            if (h) { img = Object.assign({}, img, h); updated++; }
+            return img;
+        });
+        document.getElementById('selected-text').innerText = updated > 0 ? `HD analysis done (${updated} upgraded)` : '';
         filterImages();
     });
 }
 
 // Runs in the page context: lazy-scroll then collect all image URLs
 function extractPageImages() {
-    return new Promise((resolve) => {
+    return new Promise((resolveMain) => {
+        const done = (arr) => resolveMain(arr || []);
+
         setTimeout(async () => {
-            const maxSteps = 30;
-            const step = 500;
-            let lastHeight = -1;
-            for (let i = 0; i < maxSteps; i++) {
-                if (window.innerHeight + window.scrollY >= document.body.scrollHeight - 10) break;
-                window.scrollBy(0, step);
-                await new Promise(r => setTimeout(r, 250));
-                if (document.body.scrollHeight === lastHeight) break;
-                lastHeight = document.body.scrollHeight;
-            }
-            window.scrollTo(0, 0);
-            collect();
-        }, 50);
-
-        function collect() {
-            const map = new Map();
-            function add(url) {
-                if (!url || typeof url !== 'string') return;
-                if (url.startsWith('data:') || url.startsWith('blob:')) return;
-                try {
-                    const abs = new URL(url, window.location.href);
-                    if (abs.protocol === 'http:' || abs.protocol === 'https:') {
-                        if (!map.has(abs.href)) map.set(abs.href, abs.href);
+            try {
+                const body = document.body;
+                const maxSteps = 30;
+                const step = 500;
+                let lastHeight = -1;
+                if (body) {
+                    for (let i = 0; i < maxSteps; i++) {
+                        if (window.innerHeight + window.scrollY >= body.scrollHeight - 10) break;
+                        window.scrollBy(0, step);
+                        await new Promise(r => setTimeout(r, 250));
+                        if (body.scrollHeight === lastHeight) break;
+                        lastHeight = body.scrollHeight;
                     }
-                } catch (e) {}
+                    window.scrollTo(0, 0);
+                }
+            } catch (e) {}
+
+            try {
+                const map = new Map();
+                function add(url) {
+                    if (!url || typeof url !== 'string') return;
+                    if (url.startsWith('data:') || url.startsWith('blob:')) return;
+                    try {
+                        const abs = new URL(url, window.location.href);
+                        if (abs.protocol === 'http:' || abs.protocol === 'https:') {
+                            if (!map.has(abs.href)) map.set(abs.href, abs.href);
+                        }
+                    } catch (e) {}
+                }
+
+                document.querySelectorAll('img').forEach(img => {
+                    const src = img.currentSrc || img.src || img.dataset.src ||
+                        img.getAttribute('data-original') || img.getAttribute('data-full') ||
+                        img.getAttribute('data-hd') || img.getAttribute('data-zoom');
+                    if (src) add(src);
+                    if (img.srcset) {
+                        img.srcset.split(',').forEach(part => {
+                            const u = part.trim().split(/\s+/)[0];
+                            if (u) add(u);
+                        });
+                    }
+                });
+
+                document.querySelectorAll('picture source').forEach(s => {
+                    if (s.srcset) {
+                        s.srcset.split(',').forEach(part => {
+                            const u = part.trim().split(/\s+/)[0];
+                            if (u) add(u);
+                        });
+                    }
+                    if (s.src) add(s.src);
+                });
+
+                document.querySelectorAll('a').forEach(a => {
+                    if (a.href && /\.(jpe?g|png|webp|gif|avif|svg|bmp)(\?.*)?$/i.test(a.href)) add(a.href);
+                });
+
+                document.querySelectorAll('meta').forEach(m => {
+                    const prop = (m.getAttribute('property') || m.getAttribute('name') || '').toLowerCase();
+                    if (prop === 'og:image' || prop === 'og:image:url' || prop === 'twitter:image') add(m.content);
+                });
+
+                document.querySelectorAll('div,span,section,li,a,figure,img').forEach(el => {
+                    const bg = window.getComputedStyle(el).backgroundImage;
+                    if (bg && bg !== 'none') {
+                        (bg.match(/url\((['"]?)(.*?)\1\)/g) || []).forEach(m => {
+                            const u = m.replace(/url\((['"]?)/, '').replace(/['"]?\)$/, '');
+                            if (u) add(u);
+                        });
+                    }
+                });
+
+                done(Array.from(map.keys()));
+            } catch (e) {
+                done([]);
             }
-
-            document.querySelectorAll('img').forEach(img => {
-                const src = img.currentSrc || img.src || img.dataset.src ||
-                    img.getAttribute('data-original') || img.getAttribute('data-full') ||
-                    img.getAttribute('data-hd') || img.getAttribute('data-zoom');
-                if (src) add(src);
-                if (img.srcset) {
-                    img.srcset.split(',').forEach(part => {
-                        const u = part.trim().split(/\s+/)[0];
-                        if (u) add(u);
-                    });
-                }
-            });
-
-            document.querySelectorAll('picture source').forEach(s => {
-                if (s.srcset) {
-                    s.srcset.split(',').forEach(part => {
-                        const u = part.trim().split(/\s+/)[0];
-                        if (u) add(u);
-                    });
-                }
-                if (s.src) add(s.src);
-            });
-
-            document.querySelectorAll('a').forEach(a => {
-                if (a.href && /\.(jpe?g|png|webp|gif|avif|svg|bmp)(\?.*)?$/i.test(a.href)) add(a.href);
-            });
-
-            document.querySelectorAll('meta').forEach(m => {
-                const prop = (m.getAttribute('property') || m.getAttribute('name') || '').toLowerCase();
-                if (prop === 'og:image' || prop === 'og:image:url' || prop === 'twitter:image') add(m.content);
-            });
-
-            document.querySelectorAll('div,span,section,li,a,figure,img').forEach(el => {
-                const bg = window.getComputedStyle(el).backgroundImage;
-                if (bg && bg !== 'none') {
-                    (bg.match(/url\((['"]?)(.*?)\1\)/g) || []).forEach(m => {
-                        const u = m.replace(/url\((['"]?)/, '').replace(/['"]?\)$/, '');
-                        if (u) add(u);
-                    });
-                }
-            });
-
-            resolve(Array.from(map.keys()));
-        }
+        }, 50);
     });
 }
 
@@ -200,6 +230,17 @@ function filterImages() {
     });
 
     renderGrid();
+}
+
+function fallbackIcon(imgEl) {
+    if (imgEl.dataset.fb) return;
+    imgEl.dataset.fb = '1';
+    if (imgEl.dataset.thumb && !imgEl.dataset.triedThumb) {
+        imgEl.dataset.triedThumb = '1';
+        imgEl.src = imgEl.dataset.thumb;
+    } else {
+        imgEl.src = 'icon.png';
+    }
 }
 
 function renderGrid() {
@@ -238,7 +279,7 @@ function renderGrid() {
             return `
                 <div class="img-card ${img.selected ? 'selected' : ''}" data-index="${index}">
                     <input type="checkbox" ${img.selected ? 'checked' : ''} data-index="${index}" class="img-checkbox">
-                    <img src="${img.hdUrl}" alt="img" loading="lazy" onerror="this.src='icon.png'">
+                    <img src="${img.hdUrl}" alt="img" loading="lazy" data-thumb="${img.url}">
                     <div class="img-info">${info}</div>
                 </div>
             `;
@@ -249,7 +290,7 @@ function renderGrid() {
             return `
                 <div class="img-card ${img.selected ? 'selected' : ''}" data-index="${index}">
                     <input type="checkbox" ${img.selected ? 'checked' : ''} data-index="${index}" class="img-checkbox">
-                    <img src="${img.hdUrl}" alt="img" loading="lazy" onerror="this.src='icon.png'">
+                    <img src="${img.hdUrl}" alt="img" loading="lazy" data-thumb="${img.url}">
                     ${badge}
                 </div>
             `;
@@ -262,6 +303,10 @@ function renderGrid() {
             filteredImages[index].selected = !filteredImages[index].selected;
             renderGrid();
         });
+    });
+
+    grid.querySelectorAll('img').forEach(im => {
+        im.addEventListener('error', () => fallbackIcon(im));
     });
 }
 
